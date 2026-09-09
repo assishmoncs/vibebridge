@@ -1,2 +1,3 @@
-# vibebridge
-A local MCP bridge that lets Gemini Spark interact with your codebase, terminal, and development tools.
+# VibeBridge
+
+A secure, local Model Context Protocol (MCP) bridge connecting **Gemini Spark** to your local workspace, filesystem, and development environment.
