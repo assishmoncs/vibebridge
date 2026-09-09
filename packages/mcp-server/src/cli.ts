@@ -67,7 +67,6 @@ Options:
     }
   }
 
-  // Verify workspace exists
   const absPath = path.resolve(workspacePath);
   if (!fs.existsSync(absPath)) {
     console.error(`Error: Workspace path does not exist: ${absPath}`);
@@ -97,7 +96,6 @@ async function main() {
     console.log(`[${ts}] [${badge}] [${item.category}] ${item.message}`);
   });
 
-  // CLI prompt handler for permissions if in prompt mode
   runtime.on('permission:request', (req) => {
     console.log('\n----------------- PERMISSION REQUIRED -----------------');
     console.log(`Operation: ${req.operation} (${req.category})`);
@@ -108,12 +106,11 @@ async function main() {
     }
     console.log('------------------------------------------------------');
 
-    // In auto_approve_read mode in CLI, if write occurs, auto-approve with warning or prompt
-    if (config.permissionMode === 'auto_approve_read' || config.permissionMode === 'auto_approve_all') {
-      console.log(`[Permission] Automatically allowing '${req.operation}' under current mode (${config.permissionMode})`);
+    if (config.permissionMode === 'auto_approve_all') {
+      console.log(`[Permission] Automatically allowing '${req.operation}' under current mode (auto_approve_all)`);
       runtime.respondPermission(req.id, true);
     } else {
-      console.log(`[Permission] Non-interactive CLI: Denying write operation '${req.operation}' by default for safety.`);
+      console.log(`[Permission] Non-interactive CLI: denying '${req.operation}' by default.`);
       runtime.respondPermission(req.id, false);
     }
   });
@@ -131,7 +128,6 @@ async function main() {
     console.log('========================================================');
     console.log('\nProvide this MCP Endpoint to Gemini Spark to connect!\n');
 
-    // Handle graceful shutdown
     const cleanup = async () => {
       console.log('\nShutting down VibeBridge...');
       await runtime.stop();
@@ -146,6 +142,4 @@ async function main() {
   }
 }
 
-if (require.main === module) {
-  main();
-}
+void main();
