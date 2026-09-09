@@ -1,0 +1,23 @@
+{
+  "name": "@vibebridge/mcp-server",
+  "version": "0.1.0",
+  "description": "MCP Server with Streamable HTTP transport and tunnel integration for VibeBridge",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "vibebridge": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x dist/cli.js",
+    "start": "node dist/cli.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@vibebridge/shared": "workspace:*",
+    "@vibebridge/security": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "typescript": "^5.4.5"
+  }
+}
