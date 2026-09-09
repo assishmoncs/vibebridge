@@ -1,0 +1,38 @@
+{
+  "name": "vibebridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local MCP execution bridge connecting Gemini Spark to local workspaces, filesystem, and development tools",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gemini",
+    "gemini-spark",
+    "developer-tools",
+    "tauri",
+    "desktop"
+  ],
+  "author": "assishmoncs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/assishmoncs/vibebridge.git"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run --workspaces --if-present build",
+    "clean": "npm run --workspaces --if-present clean",
+    "test": "node --test tests/test_suite.js tests/permission_test.js",
+    "start": "node packages/mcp-server/dist/cli.js",
+    "vibebridge": "node packages/mcp-server/dist/cli.js",
+    "dev:desktop": "npm run dev --workspace=@vibebridge/desktop",
+    "dev:server": "npm run start --workspace=@vibebridge/mcp-server",
+    "tauri": "npm run tauri --workspace=@vibebridge/desktop"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
