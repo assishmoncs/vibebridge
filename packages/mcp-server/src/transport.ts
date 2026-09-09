@@ -1,6 +1,6 @@
 /**
  * VibeBridge Streamable HTTP MCP Transport
- * Implements modern Streamable HTTP MCP endpoint at /mcp with session management.
+ * Implements the VibeBridge HTTP endpoint at /mcp with session management.
  */
 
 import * as http from 'node:http';
@@ -38,11 +38,13 @@ export class StreamableHttpTransport {
 
   public createSession(): McpSession {
     const id = crypto.randomUUID();
+    const now = new Date().toISOString();
     const session: McpSession = {
       id,
-      createdAt: new Date().toISOString(),
-      lastActiveAt: new Date().toISOString(),
+      createdAt: now,
+      lastActiveAt: now,
     };
+
     this.sessions.set(id, session);
     this.logger.info('session', `Created new MCP session: ${id}`);
     return session;
@@ -53,7 +55,9 @@ export class StreamableHttpTransport {
     if (!session) return false;
 
     if (session.sseResponse && !session.sseResponse.writableEnded) {
-      session.sseResponse.write('event: close\ndata: {"reason":"session_terminated"}\n\n');
+      session.sseResponse.write(
+        'event: close\ndata:{"reason":"session_terminated"}\n\n'
+      );
       session.sseResponse.end();
     }
 
@@ -62,12 +66,15 @@ export class StreamableHttpTransport {
     return true;
   }
 
-  /**
-   * Starts listening on the specified host and port.
-   */
-  public async listen(port: number, host = '127.0.0.1'): Promise<{ port: number; host: string; localUrl: string }> {
+  /** Start the local HTTP listener. */
+  public async listen(
+    port: number,
+    host = '127.0.0.1'
+  ): Promise<{ port: number; host: string; localUrl: string }> {
     return new Promise((resolve, reject) => {
-      this.httpServer = http.createServer((req, res) => this.handleHttpRequest(req, res));
+      this.httpServer = http.createServer((req, res) => {
+        void this.handleHttpRequest(req, res);
+      });
 
       this.httpServer.on('error', (err) => {
         this.logger.error('server', `HTTP Server error: ${err.message}`);
@@ -76,23 +83,29 @@ export class StreamableHttpTransport {
 
       this.httpServer.listen(port, host, () => {
         const addr = this.httpServer?.address();
-        const actualPort = typeof addr === 'object' && addr ? addr.port : port;
+        const actualPort =
+          typeof addr === 'object' && addr ? addr.port : port;
         const localUrl = `http://${host}:${actualPort}/mcp`;
-        this.logger.info('server', `VibeBridge MCP server listening on ${localUrl}`);
 
-        // Setup periodic keepalive for open SSE streams
+        this.logger.info(
+          'server',
+          `VibeBridge MCP server listening on ${localUrl}`
+        );
+
         this.pingInterval = setInterval(() => {
           this.broadcastSsePing();
         }, 15000);
 
-        resolve({ port: actualPort, host, localUrl });
+        resolve({
+          port: actualPort,
+          host,
+          localUrl,
+        });
       });
     });
   }
 
-  /**
-   * Closes the HTTP server and all open client connections.
-   */
+  /** Close the HTTP server and all sessions. */
   public async close(): Promise<void> {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
@@ -116,19 +129,31 @@ export class StreamableHttpTransport {
     });
   }
 
-  /**
-   * Dispatches incoming HTTP requests to corresponding MCP endpoints.
-   */
-  private async handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
-    const pathname = url.pathname;
-    const method = req.method?.toUpperCase();
+  private async handleHttpRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    const url = new URL(
+      req.url || '/',
+      `http://${req.headers.host || '127.0.0.1'}`
+    );
 
-    // Setup CORS headers
+    const pathname = url.pathname;
+    const method = (req.method || 'GET').toUpperCase();
+
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Mcp-Session-Id, Authorization, Accept');
-    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+    res.setHeader(
+      'Access-Control-Allow-Methods',
+      'GET, POST, DELETE, OPTIONS, HEAD'
+    );
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Mcp-Session-Id, Authorization, Accept, Last-Event-ID'
+    );
+    res.setHeader(
+      'Access-Control-Expose-Headers',
+      'Mcp-Session-Id'
+    );
 
     if (method === 'OPTIONS') {
       res.statusCode = 204;
@@ -136,7 +161,6 @@ export class StreamableHttpTransport {
       return;
     }
 
-    // Health and status inspection
     if (pathname === '/health' || pathname === '/status') {
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');
@@ -151,44 +175,72 @@ export class StreamableHttpTransport {
       return;
     }
 
-    // Streamable HTTP endpoint: /mcp
+    // Gemini/Spark may probe the MCP endpoint with HEAD first.
+    if (pathname === '/mcp' && method === 'HEAD') {
+      this.logger.info('mcp_request', 'HEAD /mcp probe');
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end();
+      return;
+    }
+
     if (pathname === '/mcp') {
-      const sessionIdHeader = (req.headers['mcp-session-id'] as string) || url.searchParams.get('sessionId') || '';
+      const sessionId =
+        (req.headers['mcp-session-id'] as string | undefined) ||
+        url.searchParams.get('sessionId') ||
+        '';
 
       if (method === 'GET') {
-        await this.handleGetMcp(req, res, sessionIdHeader);
+        await this.handleGetMcp(req, res, sessionId);
         return;
       }
 
       if (method === 'POST') {
-        await this.handlePostMcp(req, res, sessionIdHeader);
+        await this.handlePostMcp(req, res, sessionId);
         return;
       }
 
       if (method === 'DELETE') {
-        await this.handleDeleteMcp(req, res, sessionIdHeader);
+        await this.handleDeleteMcp(req, res, sessionId);
         return;
       }
 
       res.statusCode = 405;
+      res.setHeader('Allow', 'GET, POST, DELETE, HEAD, OPTIONS');
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Method Not Allowed' }));
       return;
     }
 
-    // Default 404
     res.statusCode = 404;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ error: 'Not Found' }));
   }
 
-  /**
-   * Handles GET /mcp (Server-Sent Events for streaming messages/notifications).
-   */
-  private async handleGetMcp(req: http.IncomingMessage, res: http.ServerResponse, sessionId: string): Promise<void> {
-    let session = sessionId ? this.sessions.get(sessionId) : undefined;
+  /** Handle GET /mcp for an existing session. */
+  private async handleGetMcp(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    sessionId: string
+  ): Promise<void> {
+    if (!sessionId) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          error: 'Mcp-Session-Id header or sessionId query parameter required',
+        })
+      );
+      return;
+    }
+
+    const session = this.sessions.get(sessionId);
+
     if (!session) {
-      session = this.createSession();
+      res.statusCode = 404;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'MCP session not found' }));
+      return;
     }
 
     session.lastActiveAt = new Date().toISOString();
@@ -199,99 +251,201 @@ export class StreamableHttpTransport {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Mcp-Session-Id', session.id);
 
-    // Initial SSE connection handshake comment
-    res.write(`: vibebridge streamable http connected\n\n`);
-    res.write(`event: session\ndata: ${JSON.stringify({ sessionId: session.id })}\n\n`);
-
+    res.write(': vibebridge streamable http connected\n\n');
     session.sseResponse = res;
 
     req.on('close', () => {
-      this.logger.debug('session', `SSE connection closed for session: ${session?.id}`);
-      if (session && session.sseResponse === res) {
+      this.logger.debug(
+        'session',
+        `SSE connection closed for session: ${session.id}`
+      );
+
+      if (session.sseResponse === res) {
         session.sseResponse = undefined;
       }
     });
   }
 
-  /**
-   * Handles POST /mcp (JSON-RPC tool calls, requests, and notifications).
-   */
-  private async handlePostMcp(req: http.IncomingMessage, res: http.ServerResponse, sessionId: string): Promise<void> {
-    let body = '';
-    req.on('data', (chunk) => {
-      body += chunk.toString();
-    });
+  /** Handle POST /mcp. */
+  private async handlePostMcp(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    sessionId: string
+  ): Promise<void> {
+    const body = await this.readRequestBody(req);
 
-    req.on('end', async () => {
-      try {
-        if (!body.trim()) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Empty request body' } }));
-          return;
-        }
-
-        const rpcRequest = JSON.parse(body) as JsonRpcRequest;
-
-        // Session resolution
-        let session = sessionId ? this.sessions.get(sessionId) : undefined;
-        if (!session) {
-          // If initializing, create a session automatically
-          session = this.createSession();
-        }
-
-        session.lastActiveAt = new Date().toISOString();
-        res.setHeader('Mcp-Session-Id', session.id);
-
-        const rpcResponse = await this.server.handleRequest(rpcRequest);
-
-        res.statusCode = 200;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify(rpcResponse));
-      } catch (err: any) {
-        this.logger.error('mcp_request', `Failed to parse or process POST /mcp: ${err.message}`);
-        res.statusCode = 400;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: null,
-            error: {
-              code: -32700,
-              message: `Parse error: ${err.message}`,
-            },
-          })
-        );
-      }
-    });
-  }
-
-  /**
-   * Handles DELETE /mcp (terminate session).
-   */
-  private async handleDeleteMcp(req: http.IncomingMessage, res: http.ServerResponse, sessionId: string): Promise<void> {
-    if (!sessionId) {
+    if (!body.trim()) {
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ error: 'Mcp-Session-Id header or query parameter required' }));
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32700,
+            message: 'Empty request body',
+          },
+        })
+      );
       return;
     }
 
-    const deleted = this.deleteSession(sessionId);
-    if (deleted) {
-      res.statusCode = 200;
+    let rpcRequest: JsonRpcRequest;
+
+    try {
+      rpcRequest = JSON.parse(body) as JsonRpcRequest;
+    } catch (err: any) {
+      this.logger.error(
+        'mcp_request',
+        `Invalid JSON received: ${err.message}`
+      );
+
+      res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ success: true, message: `Session ${sessionId} terminated` }));
-    } else {
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32700,
+            message: 'Parse error',
+          },
+        })
+      );
+      return;
+    }
+
+    const isInitialize = rpcRequest.method === 'initialize';
+
+    // A new session is only created by an initialize request.
+    if (!sessionId && !isInitialize) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: rpcRequest.id ?? null,
+          error: {
+            code: -32000,
+            message:
+              'No MCP session. The first request must be initialize.',
+          },
+        })
+      );
+      return;
+    }
+
+    let session = sessionId
+      ? this.sessions.get(sessionId)
+      : undefined;
+
+    if (sessionId && !session) {
       res.statusCode = 404;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ error: `Session ${sessionId} not found` }));
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: rpcRequest.id ?? null,
+          error: {
+            code: -32000,
+            message: 'MCP session not found',
+          },
+        })
+      );
+      return;
     }
+
+    if (!session) {
+      session = this.createSession();
+    }
+
+    session.lastActiveAt = new Date().toISOString();
+    res.setHeader('Mcp-Session-Id', session.id);
+
+    try {
+      const rpcResponse = await this.server.handleRequest(rpcRequest);
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(rpcResponse));
+    } catch (err: any) {
+      this.logger.error(
+        'mcp_request',
+        `Failed to process ${rpcRequest.method}: ${err.message}`
+      );
+
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: rpcRequest.id ?? null,
+          error: {
+            code: -32603,
+            message: err.message,
+          },
+        })
+      );
+    }
+  }
+
+  /** Handle DELETE /mcp. */
+  private async handleDeleteMcp(
+    _req: http.IncomingMessage,
+    res: http.ServerResponse,
+    sessionId: string
+  ): Promise<void> {
+    if (!sessionId) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          error: 'Mcp-Session-Id header or sessionId query parameter required',
+        })
+      );
+      return;
+    }
+
+    if (!this.sessions.has(sessionId)) {
+      res.statusCode = 404;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'MCP session not found' }));
+      return;
+    }
+
+    this.deleteSession(sessionId);
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ success: true }));
+  }
+
+  private readRequestBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let body = '';
+
+      req.setEncoding('utf8');
+
+      req.on('data', (chunk) => {
+        body += chunk;
+
+        if (Buffer.byteLength(body, 'utf8') > 10 * 1024 * 1024) {
+          reject(new Error('Request body exceeds 10 MB limit.'));
+          req.destroy();
+        }
+      });
+
+      req.on('end', () => resolve(body));
+      req.on('error', reject);
+    });
   }
 
   private broadcastSsePing(): void {
     for (const [, session] of this.sessions.entries()) {
-      if (session.sseResponse && !session.sseResponse.writableEnded) {
+      if (
+        session.sseResponse &&
+        !session.sseResponse.writableEnded
+      ) {
         session.sseResponse.write(': keepalive\n\n');
       }
     }
