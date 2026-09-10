@@ -23,7 +23,7 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run --workspaces --if-present build",
+    "build": "npm run build --workspace=@vibebridge/shared && npm run build --workspace=@vibebridge/security && npm run build --workspace=@vibebridge/mcp-server && npm run build --workspace=@vibebridge/desktop",
     "clean": "npm run --workspaces --if-present clean",
     "test": "node --test tests/test_suite.js tests/permission_test.js",
     "start": "node packages/mcp-server/dist/cli.js",

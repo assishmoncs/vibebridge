@@ -193,8 +193,12 @@ async function searchFiles(sandbox, input) {
 async function runCommand(sandbox, input) {
   const cwd = sandbox.getCanonicalPath();
   const startTime = Date.now();
+  const isWindows = process.platform === 'win32';
+  const shell = isWindows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
+  const shellArgs = isWindows ? ['/d', '/s', '/c', input.command] : ['-c', input.command];
+
   return new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-c', input.command], { cwd });
+    const child = spawn(shell, shellArgs, { cwd });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d.toString()));
@@ -312,13 +316,17 @@ test('Terminal Command Execution', async (t) => {
   const sandbox = new WorkspaceSandbox(testWorkspace);
 
   await t.test('executes command inside workspace directory', async () => {
-    const res = await runCommand(sandbox, { command: 'pwd' });
+    const isWindows = process.platform === 'win32';
+    const cmd = isWindows ? 'cd' : 'pwd';
+    const res = await runCommand(sandbox, { command: cmd });
     assert.strictEqual(res.exitCode, 0);
-    assert.strictEqual(res.stdout.trim(), sandbox.getCanonicalPath());
+    assert.strictEqual(res.stdout.trim().toLowerCase(), sandbox.getCanonicalPath().toLowerCase());
   });
 
   await t.test('captures exit code and stderr on failure', async () => {
-    const res = await runCommand(sandbox, { command: 'ls /nonexistent_directory_xyz_123' });
+    const isWindows = process.platform === 'win32';
+    const cmd = isWindows ? 'type nonexistent_directory_xyz_123' : 'ls /nonexistent_directory_xyz_123';
+    const res = await runCommand(sandbox, { command: cmd });
     assert.notStrictEqual(res.exitCode, 0);
     assert.ok(res.stderr.length > 0);
   });
