@@ -10,7 +10,7 @@ import {
   ToolCategory,
   PermissionMode,
   PermissionRequest,
-  PermissionStatus,
+  PermissionGrantScope,
 } from '@vibebridge/shared';
 
 export class PermissionDeniedError extends Error {
@@ -29,6 +29,8 @@ export interface PendingResolver {
 export class PermissionManager extends EventEmitter {
   private mode: PermissionMode;
   private pendingRequests: Map<string, PendingResolver> = new Map();
+  private sessionGrants: Set<ToolCategory> = new Set();
+  private workspaceGrants: Map<string, Set<ToolCategory>> = new Map();
   private requestTimeoutMs = 120000; // 2 minutes
 
   constructor(initialMode: PermissionMode = 'prompt') {
@@ -67,6 +69,70 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
+   * Checks whether an operation already has a remembered grant.
+   * Session grants follow the running VibeBridge process. Workspace grants
+   * apply only to the currently selected workspace path.
+   */
+  private hasGrant(category: ToolCategory, workingDirectory: string): boolean {
+    if (this.sessionGrants.has(category)) {
+      return true;
+    }
+
+    const workspaceGrant = this.workspaceGrants.get(workingDirectory);
+    return Boolean(workspaceGrant?.has(category));
+  }
+
+  /**
+   * Remembers an approval at the requested scope.
+   */
+  public grant(category: ToolCategory, scope: PermissionGrantScope, workingDirectory: string): void {
+    if (scope === 'once') {
+      return;
+    }
+
+    if (scope === 'session') {
+      this.sessionGrants.add(category);
+      return;
+    }
+
+    const grants = this.workspaceGrants.get(workingDirectory) || new Set<ToolCategory>();
+    grants.add(category);
+    this.workspaceGrants.set(workingDirectory, grants);
+  }
+
+  /**
+   * Revokes a remembered grant for a category and scope.
+   */
+  public revoke(category: ToolCategory, scope: Exclude<PermissionGrantScope, 'once'>, workingDirectory?: string): void {
+    if (scope === 'session') {
+      this.sessionGrants.delete(category);
+      return;
+    }
+
+    if (!workingDirectory) {
+      return;
+    }
+
+    const grants = this.workspaceGrants.get(workingDirectory);
+    if (!grants) {
+      return;
+    }
+
+    grants.delete(category);
+    if (grants.size === 0) {
+      this.workspaceGrants.delete(workingDirectory);
+    }
+  }
+
+  /**
+   * Determine whether an operation would currently be allowed without a prompt.
+   */
+  public isGranted(operation: ToolName, workingDirectory: string): boolean {
+    const category = PermissionManager.getToolCategory(operation);
+    return this.hasGrant(category, workingDirectory);
+  }
+
+  /**
    * Check or prompt for permission before running an operation.
    */
   public async authorize(
@@ -77,12 +143,17 @@ export class PermissionManager extends EventEmitter {
   ): Promise<boolean> {
     const category = PermissionManager.getToolCategory(operation);
 
-    // Rule 1: auto_approve_all approves everything
+    // Rule 1: full access mode approves everything.
     if (this.mode === 'auto_approve_all') {
       return true;
     }
 
-    // Rule 2: deny_writes rejects write and execute operations
+    // Rule 2: remembered grants avoid repeated prompts.
+    if (this.hasGrant(category, workingDirectory)) {
+      return true;
+    }
+
+    // Rule 3: deny_writes rejects write and execute operations.
     if (this.mode === 'deny_writes') {
       if (category === 'write' || category === 'execute') {
         throw new PermissionDeniedError(
@@ -93,12 +164,12 @@ export class PermissionManager extends EventEmitter {
       return true; // reads allowed
     }
 
-    // Rule 3: Read operations are auto-approved in prompt and auto_approve_read modes
+    // Rule 4: read operations are auto-approved in prompt and auto_approve_read modes.
     if (category === 'read') {
       return true;
     }
 
-    // Rule 4: Write and Execute require explicit user approval
+    // Rule 5: write and execute require explicit approval unless remembered above.
     const id = crypto.randomUUID();
     const request: PermissionRequest = {
       id,
@@ -145,19 +216,27 @@ export class PermissionManager extends EventEmitter {
         timer,
       });
 
-      // Notify UI or listeners
       this.emit('permission:request', request);
     });
   }
 
   /**
-   * Responds to a pending permission request (from Desktop UI).
+   * Responds to a pending permission request and optionally remembers the approval.
    */
-  public respond(id: string, allowed: boolean): boolean {
+  public respond(
+    id: string,
+    allowed: boolean,
+    scope: PermissionGrantScope = 'once'
+  ): boolean {
     const resolver = this.pendingRequests.get(id);
     if (!resolver) {
       return false;
     }
+
+    if (allowed && scope !== 'once') {
+      this.grant(resolver.request.category, scope, resolver.request.workingDirectory);
+    }
+
     resolver.resolve(allowed);
     return true;
   }
