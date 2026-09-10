@@ -23,6 +23,22 @@ export interface TunnelProvider {
 }
 
 /**
+ * Helper to check if an authtoken string is a placeholder or invalid.
+ */
+function isPlaceholderToken(token?: string): boolean {
+  if (!token) return true;
+  const trimmed = token.trim();
+  return (
+    !trimmed ||
+    trimmed === 'your_ngrok_auth_token_here' ||
+    trimmed.startsWith('your_') ||
+    trimmed.startsWith('<') ||
+    trimmed.toLowerCase().includes('placeholder') ||
+    trimmed.toLowerCase().startsWith('todo')
+  );
+}
+
+/**
  * Ngrok tunnel provider supporting both the official SDK and the ngrok CLI.
  */
 export class NgrokTunnelProvider implements TunnelProvider {
@@ -35,7 +51,8 @@ export class NgrokTunnelProvider implements TunnelProvider {
 
   constructor(logger: StructuredActivityLogger, authtoken?: string) {
     this.logger = logger;
-    this.authtoken = authtoken || process.env.NGROK_AUTHTOKEN;
+    const rawToken = authtoken || process.env.NGROK_AUTHTOKEN;
+    this.authtoken = isPlaceholderToken(rawToken) ? undefined : rawToken?.trim();
   }
 
   public getStatus(): TunnelStatus {
@@ -46,16 +63,27 @@ export class NgrokTunnelProvider implements TunnelProvider {
     this.status = 'connecting';
     this.logger.info('tunnel', `Starting ngrok tunnel for local port ${port}...`);
 
+    // Quick check: If ngrok is already running on the system with an active tunnel for this port
+    const existingUrl = await this.queryNgrokLocalApi(port);
+    if (existingUrl) {
+      this.publicUrl = existingUrl;
+      this.status = 'connected';
+      const mcpUrl = `${existingUrl.replace(/\/+$/, '')}/mcp`;
+      this.logger.info('tunnel', `Existing ngrok tunnel detected and reused: ${mcpUrl}`);
+      return { publicUrl: existingUrl, mcpUrl };
+    }
+
     // First attempt: If @ngrok/ngrok is available in node environment
     try {
       const ngrok = await import('@ngrok/ngrok' as string);
       if (this.authtoken) {
         process.env.NGROK_AUTHTOKEN = this.authtoken;
       }
-      const listener = await ngrok.forward({
-        addr: port,
-        authtoken: this.authtoken,
-      });
+      const forwardOptions: any = { addr: port };
+      if (this.authtoken) {
+        forwardOptions.authtoken = this.authtoken;
+      }
+      const listener = await ngrok.forward(forwardOptions);
 
       const url = listener.url();
       if (url) {
@@ -71,6 +99,19 @@ export class NgrokTunnelProvider implements TunnelProvider {
 
     // Second attempt: Launch ngrok CLI process
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let interval: NodeJS.Timeout | null = null;
+
+      const finish = (result: TunnelResult) => {
+        if (settled) return;
+        settled = true;
+        if (interval) {
+          clearInterval(interval);
+          interval = null;
+        }
+        resolve(result);
+      };
+
       try {
         const args = ['http', String(port)];
         if (this.authtoken) {
@@ -82,12 +123,43 @@ export class NgrokTunnelProvider implements TunnelProvider {
           windowsHide: true,
         });
 
+        let stderrOutput = '';
+        this.childProcess.stderr?.on('data', (chunk) => {
+          stderrOutput += chunk.toString();
+        });
+
         this.childProcess.on('error', (err) => {
           this.status = 'error';
           this.logger.warn('tunnel', `ngrok binary not found in PATH or failed to spawn: ${err.message}`);
-          // Fallback to local endpoint if ngrok fails
           const fallbackUrl = `http://localhost:${port}`;
-          resolve({
+          this.logger.warn('tunnel', `Falling back to local endpoint: ${fallbackUrl}`);
+          finish({
+            publicUrl: fallbackUrl,
+            mcpUrl: `${fallbackUrl}/mcp`,
+          });
+        });
+
+        this.childProcess.on('exit', async (code, signal) => {
+          if (settled) return;
+
+          // If ngrok exited because an existing tunnel was already running, check if it is active
+          const activeUrl = await this.queryNgrokLocalApi(port);
+          if (activeUrl) {
+            this.publicUrl = activeUrl;
+            this.status = 'connected';
+            const mcpUrl = `${activeUrl.replace(/\/+$/, '')}/mcp`;
+            this.logger.info('tunnel', `Ngrok tunnel established (reusing active tunnel): ${mcpUrl}`);
+            finish({ publicUrl: activeUrl, mcpUrl });
+            return;
+          }
+
+          this.status = 'error';
+          const trimmedErr = stderrOutput.trim();
+          const firstLineErr = trimmedErr ? trimmedErr.split('\n')[0] : `exit code ${code}`;
+          this.logger.warn('tunnel', `ngrok process exited prematurely: ${firstLineErr}`);
+          const fallbackUrl = `http://localhost:${port}`;
+          this.logger.warn('tunnel', `Falling back to local endpoint: ${fallbackUrl}`);
+          finish({
             publicUrl: fallbackUrl,
             mcpUrl: `${fallbackUrl}/mcp`,
           });
@@ -96,26 +168,27 @@ export class NgrokTunnelProvider implements TunnelProvider {
         // Poll ngrok local management API for public URL
         let attempts = 0;
         const maxAttempts = 20;
-        const interval = setInterval(async () => {
+        interval = setInterval(async () => {
           attempts++;
           try {
-            const tunnelUrl = await this.queryNgrokLocalApi();
+            const tunnelUrl = await this.queryNgrokLocalApi(port);
             if (tunnelUrl) {
-              clearInterval(interval);
               this.publicUrl = tunnelUrl;
               this.status = 'connected';
               const mcpUrl = `${tunnelUrl.replace(/\/+$/, '')}/mcp`;
               this.logger.info('tunnel', `Ngrok tunnel established via CLI: ${mcpUrl}`);
-              resolve({ publicUrl: tunnelUrl, mcpUrl });
+              finish({ publicUrl: tunnelUrl, mcpUrl });
+              return;
             }
-          } catch {
-            if (attempts >= maxAttempts) {
-              clearInterval(interval);
-              this.status = 'error';
-              const fallbackUrl = `http://localhost:${port}`;
-              this.logger.warn('tunnel', `Could not obtain ngrok public URL after timeout. Using local: ${fallbackUrl}`);
-              resolve({ publicUrl: fallbackUrl, mcpUrl: `${fallbackUrl}/mcp` });
-            }
+          } catch (err: any) {
+            this.logger.debug('tunnel', `Error checking ngrok local API: ${err.message}`);
+          }
+
+          if (attempts >= maxAttempts) {
+            this.status = 'error';
+            const fallbackUrl = `http://localhost:${port}`;
+            this.logger.warn('tunnel', `Could not obtain ngrok public URL after timeout. Using local: ${fallbackUrl}`);
+            finish({ publicUrl: fallbackUrl, mcpUrl: `${fallbackUrl}/mcp` });
           }
         }, 500);
       } catch (err: any) {
@@ -128,7 +201,9 @@ export class NgrokTunnelProvider implements TunnelProvider {
 
   public async stop(): Promise<void> {
     if (this.childProcess) {
-      this.childProcess.kill('SIGTERM');
+      try {
+        this.childProcess.kill('SIGTERM');
+      } catch {}
       this.childProcess = null;
     }
     this.status = 'disconnected';
@@ -136,15 +211,30 @@ export class NgrokTunnelProvider implements TunnelProvider {
     this.logger.info('tunnel', 'Ngrok tunnel stopped');
   }
 
-  private queryNgrokLocalApi(): Promise<string | null> {
+  private queryNgrokLocalApi(port?: number): Promise<string | null> {
     return new Promise((resolve) => {
-      const req = http.get('http://127.0.0.1:4040/api/tunnels', { timeout: 1000 }, (res) => {
+      const req = http.get('http://127.0.0.1:4040/api/tunnels', { timeout: 1500 }, (res) => {
         let raw = '';
         res.on('data', (chunk) => (raw += chunk));
         res.on('end', () => {
           try {
             const data = JSON.parse(raw);
             const tunnels = data.tunnels || [];
+            if (port) {
+              const portMatch = tunnels.find((t: any) => {
+                const addr = String(t.config?.addr || '');
+                return (
+                  (addr === `http://localhost:${port}` ||
+                    addr === `http://127.0.0.1:${port}` ||
+                    addr.endsWith(`:${port}`)) &&
+                  t.public_url &&
+                  t.public_url.startsWith('https://')
+                );
+              });
+              if (portMatch) {
+                return resolve(portMatch.public_url);
+              }
+            }
             const httpsTunnel = tunnels.find((t: any) => t.public_url && t.public_url.startsWith('https://'));
             if (httpsTunnel) {
               resolve(httpsTunnel.public_url);
@@ -157,6 +247,10 @@ export class NgrokTunnelProvider implements TunnelProvider {
             resolve(null);
           }
         });
+      });
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(null);
       });
       req.on('error', () => resolve(null));
     });

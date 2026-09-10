@@ -120,8 +120,11 @@ async function main() {
     console.log('\n========================================================');
     console.log(` Workspace:    ${status.workspacePath}`);
     console.log(` Local URL:    ${status.localUrl}`);
-    if (status.publicUrl) {
+    if (status.tunnelStatus === 'connected' && status.publicUrl && !status.publicUrl.includes('localhost') && !status.publicUrl.includes('127.0.0.1')) {
       console.log(` Public URL:   ${status.publicUrl}`);
+      console.log(` MCP Endpoint: ${status.mcpEndpoint}`);
+    } else {
+      console.log(` Tunnel:       Local fallback (${status.tunnelStatus})`);
       console.log(` MCP Endpoint: ${status.mcpEndpoint}`);
     }
     console.log(` Permissions:  ${status.permissionMode}`);
