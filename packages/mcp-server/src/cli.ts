@@ -56,6 +56,8 @@ function parseArgs(): BridgeConfig {
       ngrokAuthToken = args[++i];
     } else if (arg === '--permission-mode') {
       permissionMode = args[++i] as PermissionMode;
+    } else if (arg === '--full-access') {
+      permissionMode = 'auto_approve_all';
     } else if (arg === '--help' || arg === '-h') {
       console.log(`
 Usage: vibebridge [options]
@@ -68,6 +70,7 @@ Options:
   --no-tunnel                  Disable public tunnel creation
   --ngrok-token <token>        ngrok authentication token
   --permission-mode <mode>     Permission mode: prompt, auto_approve_read, auto_approve_all, deny_writes
+  --full-access                Shortcut for --permission-mode auto_approve_all
   -h, --help                   Display this help message
       `);
       process.exit(0);
@@ -118,7 +121,7 @@ async function main() {
         console.log('--------------------------------------------------------');
 
         if (config.permissionMode === 'auto_approve_all') {
-          console.log(`[Permission] Automatically allowing '${req.operation}' (auto_approve_all)`);
+          console.log(`[Permission] Automatically allowing '${req.operation}' (full access)`);
           runtime.respondPermission(req.id, true, 'session');
           return;
         }
