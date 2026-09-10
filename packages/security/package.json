@@ -9,7 +9,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@vibebridge/shared": "workspace:*"
+    "@vibebridge/shared": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",
