@@ -27,10 +27,15 @@ export interface ToolDefinition {
 }
 
 export type PermissionMode =
-  | 'prompt'             // Always prompt user for writes and command execution (default)
+  | 'prompt'             // Prompt user for writes and command execution
   | 'auto_approve_read' // Auto-approve read ops, prompt for write & execute
-  | 'auto_approve_all'  // Auto-approve everything (useful for headless / tests)
+  | 'auto_approve_all'  // Auto-approve everything (headless / full access)
   | 'deny_writes';      // Strict read-only mode, deny all write and execute
+
+export type PermissionGrantScope =
+  | 'once'       // Applies only to the current permission request
+  | 'session'    // Applies until VibeBridge stops
+  | 'workspace'; // Applies to the selected workspace for the current runtime
 
 export type PermissionStatus = 'pending' | 'allowed' | 'denied';
 
