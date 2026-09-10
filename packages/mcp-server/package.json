@@ -13,8 +13,8 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@vibebridge/shared": "workspace:*",
-    "@vibebridge/security": "workspace:*"
+    "@vibebridge/shared": "0.1.0",
+    "@vibebridge/security": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",
