@@ -8,6 +8,7 @@ import {
   BridgeConfig,
   BridgeStatus,
   PermissionMode,
+  PermissionGrantScope,
   ActivityLogItem,
   PermissionRequest,
 } from '@vibebridge/shared';
@@ -35,12 +36,10 @@ export class VibeBridgeRuntime extends EventEmitter {
     this.logger = new StructuredActivityLogger();
     this.permissionManager = new PermissionManager(this.config.permissionMode || 'prompt');
 
-    // Forward logger events
     this.logger.on('log', (item: ActivityLogItem) => {
       this.emit('log', item);
     });
 
-    // Forward permission events
     this.permissionManager.on('permission:request', (req: PermissionRequest) => {
       this.logger.warn('permission', `Permission requested: ${req.operation} on '${req.target}'`, req);
       this.emit('permission:request', req);
@@ -105,14 +104,16 @@ export class VibeBridgeRuntime extends EventEmitter {
 
   /**
    * Responds to an interactive permission request.
+   * A session/workspace scope remembers the approval to avoid repeated prompts.
    */
-  public respondPermission(id: string, allowed: boolean): boolean {
-    return this.permissionManager.respond(id, allowed);
+  public respondPermission(
+    id: string,
+    allowed: boolean,
+    scope: PermissionGrantScope = 'once'
+  ): boolean {
+    return this.permissionManager.respond(id, allowed, scope);
   }
 
-  /**
-   * Starts the VibeBridge runtime.
-   */
   public async start(): Promise<BridgeStatus> {
     if (this.isRunning) {
       return this.getStatus();
@@ -121,19 +122,15 @@ export class VibeBridgeRuntime extends EventEmitter {
     this.logger.info('server', 'Starting VibeBridge runtime...');
 
     try {
-      // 1. Initialize workspace sandbox
       this.sandbox = new WorkspaceSandbox(this.config.workspacePath);
       this.logger.info('server', `Workspace verified at: ${this.sandbox.getCanonicalPath()}`);
 
-      // 2. Initialize MCP server
       this.server = new McpServer(this.sandbox, this.permissionManager, this.logger);
 
-      // 3. Initialize transport
       this.transport = new StreamableHttpTransport(this.server, this.logger);
       const listenResult = await this.transport.listen(this.config.port, this.config.host);
       this.localUrl = listenResult.localUrl;
 
-      // 4. Initialize Tunnel if enabled
       if (this.config.enableTunnel) {
         this.tunnelManager = new TunnelManager(
           this.logger,
@@ -161,16 +158,11 @@ export class VibeBridgeRuntime extends EventEmitter {
     }
   }
 
-  /**
-   * Stops the VibeBridge runtime.
-   */
   public async stop(): Promise<BridgeStatus> {
     this.logger.info('server', 'Stopping VibeBridge runtime...');
 
-    // Cancel pending permissions
     this.permissionManager.cancelAllPending();
 
-    // Stop tunnel
     if (this.tunnelManager) {
       try {
         await this.tunnelManager.stop();
@@ -178,7 +170,6 @@ export class VibeBridgeRuntime extends EventEmitter {
       this.tunnelManager = null;
     }
 
-    // Stop HTTP server & sessions
     if (this.transport) {
       try {
         await this.transport.close();
