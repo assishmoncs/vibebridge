@@ -6,8 +6,10 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as readline from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
 import { VibeBridgeRuntime } from './bridge';
-import { BridgeConfig, PermissionMode } from '@vibebridge/shared';
+import { BridgeConfig, PermissionMode, PermissionGrantScope } from '@vibebridge/shared';
 
 function printBanner() {
   console.log(`
@@ -36,7 +38,12 @@ function parseArgs(): BridgeConfig {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--workspace' || arg === '-w') {
-      workspacePath = args[++i];
+      const next = args[++i];
+      if (!next) {
+        console.error('Error: --workspace requires a directory path.');
+        process.exit(1);
+      }
+      workspacePath = next;
     } else if (arg === '--port' || arg === '-p') {
       port = Number(args[++i]);
     } else if (arg === '--host') {
@@ -87,8 +94,8 @@ Options:
 async function main() {
   printBanner();
   const config = parseArgs();
-
   const runtime = new VibeBridgeRuntime(config);
+  const rl = readline.createInterface({ input, output });
 
   runtime.on('log', (item) => {
     const ts = item.timestamp.split('T')[1].slice(0, 8);
@@ -96,23 +103,56 @@ async function main() {
     console.log(`[${ts}] [${badge}] [${item.category}] ${item.message}`);
   });
 
+  // Serialize prompts so concurrent tool requests do not create overlapping questions.
+  let permissionPromptQueue = Promise.resolve();
   runtime.on('permission:request', (req) => {
-    console.log('\n----------------- PERMISSION REQUIRED -----------------');
-    console.log(`Operation: ${req.operation} (${req.category})`);
-    console.log(`Target:    ${req.target}`);
-    console.log(`Workspace: ${req.workingDirectory}`);
-    if (req.details) {
-      console.log(`Details:   ${JSON.stringify(req.details)}`);
-    }
-    console.log('------------------------------------------------------');
+    permissionPromptQueue = permissionPromptQueue
+      .then(async () => {
+        console.log('\n----------------- PERMISSION REQUIRED -----------------');
+        console.log(`Operation: ${req.operation} (${req.category})`);
+        console.log(`Target:    ${req.target}`);
+        console.log(`Workspace: ${req.workingDirectory}`);
+        if (req.details) {
+          console.log(`Details:   ${JSON.stringify(req.details)}`);
+        }
+        console.log('--------------------------------------------------------');
 
-    if (config.permissionMode === 'auto_approve_all') {
-      console.log(`[Permission] Automatically allowing '${req.operation}' under current mode (auto_approve_all)`);
-      runtime.respondPermission(req.id, true);
-    } else {
-      console.log(`[Permission] Non-interactive CLI: denying '${req.operation}' by default.`);
-      runtime.respondPermission(req.id, false);
-    }
+        if (config.permissionMode === 'auto_approve_all') {
+          console.log(`[Permission] Automatically allowing '${req.operation}' (auto_approve_all)`);
+          runtime.respondPermission(req.id, true, 'session');
+          return;
+        }
+
+        if (!input.isTTY || !output.isTTY) {
+          console.log(`[Permission] Non-interactive CLI: denying '${req.operation}' by default.`);
+          runtime.respondPermission(req.id, false);
+          return;
+        }
+
+        console.log('Choose: [o] Once  [s] Session  [w] Workspace  [d] Deny');
+        const answer = (await rl.question('Permission: ')).trim().toLowerCase();
+        const choice = answer[0];
+
+        const scope: PermissionGrantScope = choice === 's'
+          ? 'session'
+          : choice === 'w'
+            ? 'workspace'
+            : 'once';
+        const allowed = choice === 'o' || choice === 's' || choice === 'w';
+
+        if (!allowed) {
+          console.log(`[Permission] Denied '${req.operation}'.`);
+          runtime.respondPermission(req.id, false);
+          return;
+        }
+
+        console.log(`[Permission] Allowed '${req.operation}' for ${scope}.`);
+        runtime.respondPermission(req.id, true, scope);
+      })
+      .catch((err) => {
+        console.error(`[Permission] Failed to handle request: ${err.message}`);
+        runtime.respondPermission(req.id, false);
+      });
   });
 
   try {
@@ -133,6 +173,7 @@ async function main() {
 
     const cleanup = async () => {
       console.log('\nShutting down VibeBridge...');
+      rl.close();
       await runtime.stop();
       process.exit(0);
     };
@@ -140,6 +181,7 @@ async function main() {
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);
   } catch (err: any) {
+    rl.close();
     console.error(`Failed to launch VibeBridge: ${err.message}`);
     process.exit(1);
   }
